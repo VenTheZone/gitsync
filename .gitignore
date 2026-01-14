@@ -1,0 +1,63 @@
+# Binaries
+gitsync
+github-lazysync
+
+# Build artifacts
+*.o
+*.a
+*.so
+*.dylib
+
+# Compiled Object files
+*.obj
+*.ko
+
+# Precompiled Headers
+*.gch
+*.pch
+
+# Compiled Dynamic libraries
+*.dll
+*.exe
+*.out
+*.app
+
+# CMake
+CMakeCache.txt
+CMakeFiles
+cmake_install.cmake
+Makefile.cmake
+
+# Testing
+*.test
+test_results/
+coverage/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Documentation artifacts
+*.aux
+*.log
+*.toc
+*.out
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+
+# Continuous Learning Plugin artifacts
+.clangd/
+.cache/
+.llvm/
+
+.code-evolve/
