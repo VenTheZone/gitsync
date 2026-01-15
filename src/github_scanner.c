@@ -7,9 +7,20 @@
 #include <time.h>
 #include <termios.h>
 #include <ctype.h>
+#include <libgen.h>
 
 #define MAX_REPOS 100
 #define MAX_PATH_LEN 1024
+
+#define COLOR_GREEN  "\033[1;32m"
+#define COLOR_YELLOW "\033[1;33m"
+#define COLOR_RED    "\033[1;31m"
+#define COLOR_BLUE   "\033[1;34m"
+#define COLOR_CYAN   "\033[1;36m"
+#define COLOR_WHITE  "\033[1;37m"
+#define COLOR_RESET  "\033[0m"
+#define COLOR_DIM    "\033[2;37m"
+#define COLOR_BOLD   "\033[1m"
 
 typedef struct {
     char name[256];
@@ -17,6 +28,9 @@ typedef struct {
     char remote[512];
     char branch[64];
     int is_git;
+    int has_local_changes;
+    int has_remote_changes;
+    int sync_status;
 } Repository;
 
 typedef enum {
@@ -31,6 +45,17 @@ typedef enum {
     COMMIT_PROMPT
 } CommitMode;
 
+typedef enum {
+    SYNC_IDLE,
+    SYNC_SCANNING,
+    SYNC_FETCHING,
+    SYNC_PULLING,
+    SYNC_COMMITTING,
+    SYNC_PUSHING,
+    SYNC_DONE,
+    SYNC_ERROR
+} SyncState;
+
 typedef struct {
     InterfaceMode mode;
     const char* scan_dir;
@@ -41,27 +66,80 @@ typedef struct {
 } ProgramConfig;
 
 Repository repos[MAX_REPOS];
-int repo_count = 0;
+static int repo_count = 0;
+static int loading_active = 0;
 
-// Check if directory is a git repository
-int is_git_repo(const char* path) {
+static char filter_text[256] = "";
+static int filtered_count = 0;
+
+void show_error(const char* message);
+void show_warning(const char* message);
+void show_success(const char* message);
+void show_info(const char* message);
+void start_loading(const char* message);
+void stop_loading(void);
+
+static void clear_screen(void) {
+    printf("\033[2J\033[1;1H");
+    fflush(stdout);
+}
+
+static void draw_separator_line(int y, int length) {
+    printf("\033[%d;1H", y);
+    for (int i = 0; i < length; i++) printf("─");
+    printf("\n");
+}
+
+void show_error(const char* message) {
+    printf("%s[%s]%s %s\n", COLOR_RED, "ERROR", COLOR_RESET, message);
+    fflush(stdout);
+}
+
+void show_warning(const char* message) {
+    printf("%s[%s]%s %s\n", COLOR_YELLOW, "WARN", COLOR_RESET, message);
+    fflush(stdout);
+}
+
+void show_success(const char* message) {
+    printf("%s[%s]%s %s\n", COLOR_GREEN, "OK", COLOR_RESET, message);
+    fflush(stdout);
+}
+
+void show_info(const char* message) {
+    printf("%s[%s]%s %s\n", COLOR_BLUE, "INFO", COLOR_RESET, message);
+    fflush(stdout);
+}
+
+void start_loading(const char* message) {
+    loading_active = 1;
+    printf("%s[%s]%s %s ", COLOR_YELLOW, "LOADING", COLOR_RESET, message);
+    fflush(stdout);
+}
+
+void stop_loading(void) {
+    if (loading_active) {
+        printf("\b \b");
+        fflush(stdout);
+        loading_active = 0;
+    }
+}
+
+static int is_git_repo(const char* path) {
     char git_path[1024];
-    snprintf(git_path, sizeof(git_path), "%s/.git", path);
-    
     struct stat st;
+    snprintf(git_path, sizeof(git_path), "%s/.git", path);
     return stat(git_path, &st) == 0 && S_ISDIR(st.st_mode);
 }
 
-// Check if repository has uncommitted changes
-int has_local_changes(const char *path) {
+static int has_local_changes(const char *path) {
     char cmd[MAX_PATH_LEN * 2];
     char buffer[256];
+    int has_changes = 0;
     
     snprintf(cmd, sizeof(cmd), "cd \"%s\" && git status --porcelain 2>/dev/null | head -1", path);
     FILE *fp = popen(cmd, "r");
     if (!fp) return 0;
     
-    int has_changes = 0;
     if (fgets(buffer, sizeof(buffer), fp)) {
         has_changes = 1;
     }
@@ -69,16 +147,15 @@ int has_local_changes(const char *path) {
     return has_changes;
 }
 
-// Check if remote has changes
-int has_remote_changes(const char *path) {
+static int has_remote_changes(const char *path) {
     char cmd[MAX_PATH_LEN * 2];
     char buffer[256];
+    int has_changes = 0;
     
     snprintf(cmd, sizeof(cmd), "cd \"%s\" && git fetch origin main 2>/dev/null && git log HEAD..origin/main --oneline 2>/dev/null | head -1", path);
     FILE *fp = popen(cmd, "r");
     if (!fp) return 0;
     
-    int has_changes = 0;
     if (fgets(buffer, sizeof(buffer), fp)) {
         has_changes = 1;
     }
@@ -86,182 +163,407 @@ int has_remote_changes(const char *path) {
     return has_changes;
 }
 
-// Check if fzf is available
-int has_fzf() {
-    return system("which fzf > /dev/null 2>&1") == 0;
-}
-
-void show_loading(const char *message) {
-    printf("[~] %s", message);
-    fflush(stdout);
-    
-    char spinner[] = "|/-\\";
-    for (int i = 0; i < 10; i++) {
-        printf("\b%c", spinner[i % 4]);
-        fflush(stdout);
-        usleep(100000);
-    }
-    printf("\b \n");
-}
-
-// Get repository info (remote and branch)
-void get_repo_info(Repository* repo) {
+static void get_branch_name(const char *path, char *branch, size_t branch_size) {
     char cmd[MAX_PATH_LEN * 2];
-    FILE* fp;
+    FILE *fp;
     
-    // Initialize defaults
-    strcpy(repo->remote, "No remote");
-    strcpy(repo->branch, "unknown");
+    strcpy(branch, "unknown");
     
-    if (!repo->is_git) return;
-    
-    // Get remote URL
-    snprintf(cmd, sizeof(cmd), "cd \"%s\" && git remote get-url origin 2>/dev/null || echo 'No remote'", repo->path);
+    snprintf(cmd, sizeof(cmd), "cd \"%s\" && git branch --show-current 2>/dev/null || echo 'unknown'", path);
     fp = popen(cmd, "r");
     if (fp) {
-        if (fgets(repo->remote, sizeof(repo->remote), fp)) {
-            repo->remote[strcspn(repo->remote, "\n")] = '\0';
-        }
-        pclose(fp);
-    }
-    
-    // Get current branch
-    snprintf(cmd, sizeof(cmd), "cd \"%s\" && git branch --show-current 2>/dev/null || echo 'unknown'", repo->path);
-    fp = popen(cmd, "r");
-    if (fp) {
-        if (fgets(repo->branch, sizeof(repo->branch), fp)) {
-            repo->branch[strcspn(repo->branch, "\n")] = '\0';
+        if (fgets(branch, branch_size, fp)) {
+            branch[strcspn(branch, "\n")] = '\0';
         }
         pclose(fp);
     }
 }
 
-void scan_directory(const char *path, int depth) {
-    if (depth > 3 || repo_count >= MAX_REPOS) return;
+static void get_remote_url(const char *path, char *remote, size_t remote_size) {
+    char cmd[MAX_PATH_LEN * 2];
+    FILE *fp;
+    
+    strcpy(remote, "No remote");
+    
+    snprintf(cmd, sizeof(cmd), "cd \"%s\" && git remote get-url origin 2>/dev/null || echo 'No remote'", path);
+    fp = popen(cmd, "r");
+    if (fp) {
+        if (fgets(remote, remote_size, fp)) {
+            remote[strcspn(remote, "\n")] = '\0';
+        }
+        pclose(fp);
+    }
+}
+
+static void get_repo_info(Repository* repo) {
+    get_branch_name(repo->path, repo->branch, sizeof(repo->branch));
+    get_remote_url(repo->path, repo->remote, sizeof(repo->remote));
+    repo->has_local_changes = has_local_changes(repo->path);
+    repo->has_remote_changes = has_remote_changes(repo->path);
+    repo->sync_status = SYNC_IDLE;
+}
+
+static int is_excluded_path(const char* path) {
+    const char* exclude_patterns[] = {
+        "/.git/", "/.oh-my-zsh/", "/node_modules/", "/.cache/",
+        "/.local/share/", "/.config/", "/.mozilla/", "/.thumbnails/",
+        NULL
+    };
+    
+    for (int i = 0; exclude_patterns[i] != NULL; i++) {
+        if (strstr(path, exclude_patterns[i]) != NULL) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void add_repo_from_path(const char* full_path) {
+    if (repo_count >= MAX_REPOS) return;
+    
+    if (is_excluded_path(full_path)) return;
+    
+    struct stat st;
+    if (stat(full_path, &st) != 0 || !S_ISDIR(st.st_mode)) return;
+    
+    char git_path[MAX_PATH_LEN];
+    snprintf(git_path, sizeof(git_path), "%s/.git", full_path);
+    
+    if (stat(git_path, &st) != 0 || !S_ISDIR(st.st_mode)) return;
+    
+    Repository *repo = &repos[repo_count];
+    repo->is_git = 1;
+    
+    const char* dir_name = strrchr(full_path, '/');
+    if (dir_name) dir_name++;
+    else dir_name = full_path;
+    
+    strncpy(repo->name, dir_name, sizeof(repo->name) - 1);
+    repo->name[sizeof(repo->name) - 1] = '\0';
+    strncpy(repo->path, full_path, sizeof(repo->path) - 1);
+    repo->path[sizeof(repo->path) - 1] = '\0';
+    
+    get_repo_info(repo);
+    repo_count++;
+}
+
+static void scan_system_for_repos(void) {
+    repo_count = 0;
+    
+    char cmd[MAX_PATH_LEN * 4];
+    snprintf(cmd, sizeof(cmd),
+        "find /home /opt /usr/local -type d -name '.git' 2>/dev/null | "
+        "while read -r gitpath; do dirname \"$gitpath\"; done | sort -u");
+    
+    FILE* fp = popen(cmd, "r");
+    if (!fp) return;
+    
+    char line[MAX_PATH_LEN];
+    while (fgets(line, sizeof(line), fp) && repo_count < MAX_REPOS) {
+        line[strcspn(line, "\n")] = '\0';
+        if (strlen(line) > 1) {
+            add_repo_from_path(line);
+        }
+    }
+    pclose(fp);
+}
+
+static void scan_directory(const char *path, int depth) {
+    if (depth > 5) return; // Prevent infinite recursion
+    
+    // Check if current path is a git repository
+    if (is_git_repo(path)) {
+        if (repo_count < MAX_REPOS) {
+            // Extract repo name from path
+            const char *base = strrchr(path, '/');
+            if (base) {
+                base++; // Skip the '/'
+            } else {
+                base = path;
+            }
+            
+            strncpy(repos[repo_count].name, base, sizeof(repos[repo_count].name) - 1);
+            strncpy(repos[repo_count].path, path, sizeof(repos[repo_count].path) - 1);
+            repos[repo_count].name[sizeof(repos[repo_count].name) - 1] = '\0';
+            repos[repo_count].path[sizeof(repos[repo_count].path) - 1] = '\0';
+            
+            repos[repo_count].has_local_changes = has_local_changes(path);
+            repos[repo_count].has_remote_changes = has_remote_changes(path);
+            get_branch_name(path, repos[repo_count].branch, sizeof(repos[repo_count].branch));
+            
+            repo_count++;
+        }
+        return; // Don't scan inside a git repo
+    }
     
     DIR *dir = opendir(path);
     if (!dir) return;
     
     struct dirent *entry;
-    while ((entry = readdir(dir)) != NULL && repo_count < MAX_REPOS) {
-        if (entry->d_name[0] == '.') continue;
+    while ((entry = readdir(dir)) != NULL) {
+        if (entry->d_name[0] == '.') continue; // Skip hidden files/dirs
         
-        char full_path[MAX_PATH_LEN];
+        char full_path[2048];
         snprintf(full_path, sizeof(full_path), "%s/%s", path, entry->d_name);
         
-        struct stat st;
-        if (stat(full_path, &st) == 0 && S_ISDIR(st.st_mode)) {
-            if (is_git_repo(full_path)) {
-                Repository *repo = &repos[repo_count];
-                strncpy(repo->name, entry->d_name, sizeof(repo->name) - 1);
-                strncpy(repo->path, full_path, sizeof(repo->path) - 1);
-                repo->is_git = 1;
-                get_repo_info(repo);
-                repo_count++;
-            } else {
-                scan_directory(full_path, depth + 1);
-            }
+        if (entry->d_type == DT_DIR) {
+            scan_directory(full_path, depth + 1);
         }
     }
-    
     closedir(dir);
 }
 
 Repository* scan_github_repos(const char* root_dir, int* count) {
     repo_count = 0;
-    scan_directory(root_dir, 0);
+    
+    printf("\n");
+    start_loading("Scanning for Git repositories");
+    
+    if (strcmp(root_dir, ".") == 0 || root_dir[0] == '\0') {
+        scan_system_for_repos();
+    } else {
+        // Scan specific directory 
+        scan_directory(root_dir, 0);
+    }
+    
+    stop_loading();
+    printf(" done\n");
+    
+    if (repo_count > 0) {
+        printf("%s[%s]%s Found %d repository %s\n", COLOR_GREEN, "OK", COLOR_RESET, repo_count, repo_count == 1 ? "" : "s");
+    } else {
+        printf("%s[%s]%s No repositories found\n", COLOR_YELLOW, "WARN", COLOR_RESET);
+    }
+    
     *count = repo_count;
     return repos;
 }
 
-// Terminal control functions for native TUI
-void enable_raw_mode();
-void disable_raw_mode();
-void clear_screen();
-void print_tui_header();
-void display_repos_with_highlight(int cursor_pos);
-
-// Function declarations for interface modes
-char* simple_select_repo();
-char* tui_select_repo();
-InterfaceMode detect_best_interface(void);
-char* select_repository_interface(InterfaceMode mode);
-
-// Terminal control functions
 static struct termios old_termios, new_termios;
 
-void enable_raw_mode() {
+static void enable_raw_mode(void) {
     tcgetattr(STDIN_FILENO, &old_termios);
     new_termios = old_termios;
     new_termios.c_lflag &= ~(ICANON | ECHO);
     tcsetattr(STDIN_FILENO, TCSANOW, &new_termios);
 }
 
-void disable_raw_mode() {
+static void disable_raw_mode(void) {
     tcsetattr(STDIN_FILENO, TCSANOW, &old_termios);
 }
 
-void clear_screen() {
-    printf("\033[2J\033[1;1H");
-    fflush(stdout);
-}
-
-void print_tui_header() {
-    printf("\n");
-    printf("+------------------------------------------------------+\n");
-    printf("|              GITHUB SCANNER v1.2                    |\n");
-    printf("|    ↑/↓ or j/k: Navigate | Enter: Sync | q: Quit    |\n");
-    printf("|                    n: Rescan repositories           |\n");
-    printf("+------------------------------------------------------+\n");
-}
-
-void display_repos_with_highlight(int cursor_pos) {
+static void draw_header(void) {
     clear_screen();
-    print_tui_header();
     
-    printf("\nFound %d Git repositories:\n\n", repo_count);
+    // Title
+    printf("%s  GitSync v2.0  %s\n\n", COLOR_GREEN, COLOR_RESET);
+    
+    // Repository count
+    printf("%sFound %d repositories%s\n\n", COLOR_BLUE, repo_count, repo_count == 1 ? "" : "ies");
+    
+    // Separator
+    draw_separator_line(4, 80);
+}
+
+static void draw_repo_list(int cursor_pos) {
+    int start_y = 5;
+    
+    printf("\033[%d;1H", start_y);
+    printf("%sRepositories:%s\n", COLOR_CYAN, COLOR_RESET);
     
     for (int i = 0; i < repo_count; i++) {
-        Repository *repo = &repos[i];
+        printf("\033[%d;3H", start_y + 1 + i);
         
-        // Show highlight for cursor position
         if (i == cursor_pos) {
-            printf("\033[1;32m▶ \033[0m"); // Green pointer for highlight
+            printf("%s▶ %s%s", COLOR_GREEN, COLOR_WHITE, repos[i].name);
         } else {
-            printf("  ");
+            printf("  %s", repos[i].name);
         }
         
-        printf("%-30s \033[2;37m[%s]\033[0m\n", repo->name, repo->branch);
-        printf("   \033[2;36m%s\033[0m\n", repo->path);
-        
-        if (strcmp(repo->remote, "No remote") != 0) {
-            printf("   \033[2;33m%s\033[0m\n", repo->remote);
+        // Status indicators
+        if (repos[i].has_local_changes) {
+            printf("%s [+]%s", COLOR_YELLOW, COLOR_RESET);
         }
-        printf("\n");
+        if (repos[i].has_remote_changes) {
+            printf("%s [↓]%s", COLOR_CYAN, COLOR_RESET);
+        }
+        if (!repos[i].has_local_changes && !repos[i].has_remote_changes) {
+            printf("%s [✓]%s", COLOR_GREEN, COLOR_RESET);
+        }
     }
-    
-    printf("\nNavigate with ↑/↓ arrow keys\n");
-    printf("Press Enter to sync highlighted repository\n");
-    printf("Press 'q' to quit\n");
 }
 
-// Required function stubs
-char* run_simple_interface(GitHubRepo* repos, int count);
-char* run_tui_interface(GitHubRepo* repos, int count);
+static void draw_selected_details(int cursor_pos) {
+    if (cursor_pos < 0 || cursor_pos >= repo_count) return;
+    
+    Repository* repo = &repos[cursor_pos];
+    int details_start = 5 + repo_count + 2;
+    
+    printf("\033[%d;1H", details_start);
+    printf("\n%sSelected Repository:%s\n", COLOR_YELLOW, COLOR_RESET);
+    printf("  Name: %s%s%s\n", COLOR_WHITE, repo->name, COLOR_RESET);
+    printf("  Path: %s%s%s\n", COLOR_WHITE, repo->path, COLOR_RESET);
+    printf("  Branch: %s%s%s\n", COLOR_WHITE, repo->branch, COLOR_RESET);
+    printf("  Remote: %s%s%s\n", COLOR_WHITE, repo->remote, COLOR_RESET);
+    
+    // Status
+    printf("  Status: ");
+    if (repo->has_local_changes) {
+        printf("%sHas local changes%s", COLOR_YELLOW, COLOR_RESET);
+    }
+    if (repo->has_remote_changes) {
+        printf("%sHas remote changes%s", COLOR_CYAN, COLOR_RESET);
+    }
+    if (!repo->has_local_changes && !repo->has_remote_changes) {
+        printf("%sClean%s", COLOR_GREEN, COLOR_RESET);
+    }
+    printf("\n");
+}
 
-// Simple Interface - Basic text selection
-char* simple_select_repo() {
+static void draw_filter_info(void) {
+    printf("\033[1;1H");
+    printf("Filter: %s%s%s", COLOR_GREEN, filter_text, COLOR_RESET);
+    if (strlen(filter_text) > 0) {
+        printf(" (%d matches)", filtered_count);
+    }
+    printf("\n");
+}
+
+static void draw_help_bar(void) {
+    printf("\033[24;1H");
+    printf("%sNavigation: ↑↓/jk  | Select: Enter | Filter: type letters | Clear: Backspace | Quit: q | Rescan: n%s", COLOR_DIM, COLOR_RESET);
+    printf("\033[K"); // Clear rest of line
+}
+
+static int get_filtered_count(void) {
+    if (strlen(filter_text) == 0) return repo_count;
+    
+    int count = 0;
+    for (int i = 0; i < repo_count; i++) {
+        if (strstr(repos[i].name, filter_text) != NULL) {
+            count++;
+        }
+    }
+    return count;
+}
+
+static int get_filtered_index(int visible_index) {
+    if (strlen(filter_text) == 0) return visible_index;
+    
+    int count = 0;
+    for (int i = 0; i < repo_count; i++) {
+        if (strstr(repos[i].name, filter_text) != NULL) {
+            if (count == visible_index) return i;
+            count++;
+        }
+    }
+    return 0;
+}
+
+
+
+static char* tui_select_repo(const char* scan_dir, CommitMode commit_mode) {
+    (void)commit_mode;
     if (repo_count == 0) {
         return NULL;
     }
     
-    printf("\nAvailable repositories:\n");
+    printf("\nPress any key to start...");
+    getchar();
+    
+    int running = 1;
+    int cursor_pos = 0;
+    char* selected = NULL;
+    
+    enable_raw_mode();
+    
+    while (running) {
+        filtered_count = get_filtered_count();
+        
+        draw_header();
+        draw_filter_info();
+        draw_repo_list(cursor_pos);
+        draw_selected_details(cursor_pos);
+        draw_help_bar();
+        
+        int ch = getchar();
+        
+        if (ch == '\033') {
+            getchar(); // Skip [
+            int arrow_key = getchar();
+            switch(arrow_key) {
+                case 'A':
+                    if (cursor_pos > 0) cursor_pos--;
+                    break;
+                case 'B':
+                    if (cursor_pos < filtered_count - 1) cursor_pos++;
+                    break;
+            }
+        } else if (ch >= 32 && ch <= 126) { // Printable characters
+            if (ch == 'q' || ch == 'Q') {
+                running = 0;
+            } else if (ch == '\n' || ch == '\r') {
+                if (filtered_count > 0) {
+                    int actual_idx = get_filtered_index(cursor_pos);
+                    selected = strdup(repos[actual_idx].name);
+                }
+                running = 0;
+            } else if (ch == 127 || ch == 8) { // Backspace - need to check for both
+                size_t len = strlen(filter_text);
+                if (len > 0) {
+                    filter_text[len - 1] = '\0';
+                    cursor_pos = 0;
+                }
+            } else if (ch == 'n' || ch == 'N') {
+                disable_raw_mode();
+                printf("\n");
+                printf("Rescanning repositories...\n");
+                scan_github_repos(scan_dir, &repo_count);
+                enable_raw_mode();
+                cursor_pos = 0;
+            } else {
+                // Add to filter
+                size_t len = strlen(filter_text);
+                if (len < 255) {
+                    filter_text[len] = (char)ch;
+                    filter_text[len + 1] = '\0';
+                    cursor_pos = 0;
+                }
+            }
+        } else if (ch == 127 || ch == 8) { // Backspace - also handle here for safety
+            size_t len = strlen(filter_text);
+            if (len > 0) {
+                filter_text[len - 1] = '\0';
+                cursor_pos = 0;
+            }
+        }
+    }
+    
+    disable_raw_mode();
+    clear_screen();
+    
+    return selected;
+}
+
+static char* simple_select_repo(void) {
+    if (repo_count == 0) {
+        return NULL;
+    }
+    
+    printf("\n%s[%s]%s Available repositories:\n", COLOR_BLUE, "LIST", COLOR_RESET);
     for (int i = 0; i < repo_count; i++) {
-        printf("  %d. %s (%s)\n", i + 1, repos[i].name, repos[i].is_git ? "Git" : "No Git");
+        char status[32] = "";
+        if (repos[i].has_local_changes) strcat(status, "[+] ");
+        if (repos[i].has_remote_changes) strcat(status, "[↓] ");
+        if (!repos[i].has_local_changes && !repos[i].has_remote_changes) strcat(status, "[✓] ");
+        
+        printf("  %s%d.%s %s%s %s(%s)%s\n", COLOR_YELLOW, i + 1, COLOR_RESET, 
+               COLOR_WHITE, repos[i].name, COLOR_BLUE, status, COLOR_RESET);
+        printf("      %s%s%s\n", COLOR_DIM, repos[i].path, COLOR_RESET);
     }
     
     int selection = 0;
-    printf("\nSelect repository (1-%d): ", repo_count);
+    printf("\n%s[%s]%s Select repository (1-%d): ", COLOR_BLUE, "INPUT", COLOR_RESET, repo_count);
     if (scanf("%d", &selection) == 1 && selection >= 1 && selection <= repo_count) {
         while (getchar() != '\n');
         return strdup(repos[selection - 1].path);
@@ -271,195 +573,151 @@ char* simple_select_repo() {
     return NULL;
 }
 
-// TUI Interface - Native terminal implementation
-char* tui_select_repo() {
-    if (repo_count == 0) {
-        return NULL;
-    }
-    
-    int running = 1;
-    int cursor_pos = 0;
+static InterfaceMode detect_best_interface(void) {
+    return MODE_TUI;
+}
+
+
+
+static void scan_system_for_repos(void);
+static void sync_repository(const char* path, CommitMode commit_mode);
+static char* select_repository_interface(InterfaceMode mode, const char* scan_dir, CommitMode commit_mode);
+static InterfaceMode detect_best_interface(void);
+
+static char* select_repository_interface(InterfaceMode mode, const char* scan_dir, CommitMode commit_mode) {
     char* selected = NULL;
     
-    // Set terminal to raw mode for immediate input
-    enable_raw_mode();
+    switch (mode) {
+        case MODE_TUI:
+            selected = tui_select_repo(scan_dir, commit_mode);
+            break;
+        case MODE_SIMPLE:
+            selected = simple_select_repo();
+            break;
+        case MODE_AUTO:
+        default:
+            selected = select_repository_interface(detect_best_interface(), scan_dir, commit_mode);
+            break;
+    }
     
-    while (running) {
-        display_repos_with_highlight(cursor_pos);
-        
-        int ch = getchar();
-        
-        // Handle arrow keys (they come as escape sequences)
-        if (ch == '\033') {
-            // Skip the next two characters for arrow keys
-            getchar(); // Skip '['
-            int arrow_key = getchar();
-            
-            switch(arrow_key) {
-                case 'A': // Up arrow
-                    if (cursor_pos > 0) cursor_pos--;
-                    break;
-                case 'B': // Down arrow
-                    if (cursor_pos < repo_count - 1) cursor_pos++;
-                    break;
-            }
-        } else {
-            switch(ch) {
-                case 'q':
-                case 'Q':
-                    running = 0;
-                    break;
-                    
-                case '\n': // Enter key
-                case '\r': // Carriage return
-                    selected = strdup(repos[cursor_pos].path);
-                    running = 0;
-                    break;
-                    
-                case 'k': // vim-style up
-                case 'K':
-                    if (cursor_pos > 0) cursor_pos--;
-                    break;
-                    
-                case 'j': // vim-style down
-                case 'J':
-                    if (cursor_pos < repo_count - 1) cursor_pos++;
-                    break;
-                    
-                case 'n':
-                case 'N':
-                    disable_raw_mode();
-                    repo_count = 0;
-                    cursor_pos = 0;
-                    show_loading("Rescanning for Git repositories");
-                    scan_directory(".", 0);
-                    enable_raw_mode();
-                    break;
+    // If a repository was selected, sync it
+    if (selected) {
+        // Find the actual repository path from the name
+        for (int i = 0; i < repo_count; i++) {
+            if (strcmp(repos[i].name, selected) == 0) {
+                sync_repository(repos[i].path, commit_mode);
+                free(selected);
+                selected = NULL;
+                break;
             }
         }
     }
-    
-    // Restore terminal mode
-    disable_raw_mode();
-    clear_screen();
     
     return selected;
 }
 
-// Required stub functions
-char* run_simple_interface() {
-    return simple_select_repo();
-}
-
-char* run_tui_interface() {
-    return tui_select_repo();
-}
-
-// Auto-detect best interface available
-InterfaceMode detect_best_interface(void) {
-    if (has_fzf()) {
-        return MODE_TUI;
-    }
-    return MODE_SIMPLE;
-}
-
-// Mode-specific repository selection
-char* select_repository_interface(InterfaceMode mode) {
-    switch (mode) {
-        case MODE_TUI:
-            return tui_select_repo();
-        case MODE_SIMPLE:
-            return simple_select_repo();
-        case MODE_AUTO:
-        default:
-            return select_repository_interface(detect_best_interface());
-    }
-}
-
-// Sync selected repository
-void sync_repository(const char* path, CommitMode commit_mode) {
-    printf("Syncing repository: %s\n", path);
+static void sync_repository(const char* path, CommitMode commit_mode) {
+    (void)commit_mode;
     
-    if (is_git_repo(path)) {
-        char cmd[1024];
-        int use_timestamp = 0;
-        char final_commit_msg[512] = "gitsync: Manual sync";
+    /*
+     * Simple sync workflow inspired by Obsidian-GitHub-Sync plugin:
+     * 1. Pull remote changes first (handles conflicts upfront)
+     * 2. Stage all local changes
+     * 3. Commit with auto-timestamp
+     * 4. Push to remote
+     * 
+     * Philosophy: Keep it simple, no branching, user resolves conflicts manually
+     */
+    
+    printf("\n");
+    printf("%s[%s]%s Syncing vault: %s%s%s\n", COLOR_BLUE, "SYNC", COLOR_RESET, COLOR_WHITE, path, COLOR_RESET);
+    
+    if (!is_git_repo(path)) {
+        printf("%s[%s]%s Not a git repository%s\n", COLOR_RED, "ERROR", COLOR_RESET, "");
+        return;
+    }
+    
+    char cmd[2048];
+    char final_commit_msg[512];
+    time_t now = time(NULL);
+    struct tm* t = localtime(&now);
+    strftime(final_commit_msg, sizeof(final_commit_msg), "GitSync: %Y-%m-%d %H:%M", t);
+    
+    // Check for changes first
+    printf("\n");
+    start_loading("Checking for changes...");
+    int local_changes = has_local_changes(path);
+    int remote_changes = has_remote_changes(path);
+    stop_loading();
+    
+    if (!local_changes && !remote_changes) {
+        printf("%s[%s]%s Vault is up to date\n", COLOR_GREEN, "OK", COLOR_RESET);
+        return;
+    }
+    
+    // Step 1: Pull remote changes first (like Obsidian-GitHub-Sync)
+    printf("\n");
+    start_loading("Pulling remote changes...");
+    snprintf(cmd, sizeof(cmd), "cd \"%s\" && git pull origin main 2>&1", path);
+    int pull_result = system(cmd);
+    stop_loading();
+    
+    if (pull_result != 0) {
+        printf("\n%s[%s]%s Pull failed - merge conflicts detected\n", COLOR_RED, "CONFLICT", COLOR_RESET);
+        printf("%s[%s]%s Resolve conflicts in your editor, then run sync again\n", COLOR_YELLOW, "HINT", COLOR_RESET);
+        return;
+    }
+    printf("%s[%s]%s Pulled remote changes\n", COLOR_GREEN, "OK", COLOR_RESET);
+    
+    // Step 2: Stage and commit local changes
+    if (local_changes) {
+        printf("\n");
+        start_loading("Staging and committing local changes...");
+        snprintf(cmd, sizeof(cmd), "cd \"%s\" && git add -A && git commit -m \"%s\" 2>&1", path, final_commit_msg);
+        int commit_result = system(cmd);
+        stop_loading();
         
-        // Determine commit message based on mode
-        switch (commit_mode) {
-            case COMMIT_DATE:
-                use_timestamp = 1;
-                break;
-            case COMMIT_MANUAL:
-                printf("Enter commit message: ");
-                if (fgets(final_commit_msg, sizeof(final_commit_msg), stdin)) {
-                    final_commit_msg[strcspn(final_commit_msg, "\n")] = '\0';
-                }
-                break;
-            case COMMIT_PROMPT:
-                printf("Use timestamped commit? (y/n): ");
-                char response[10];
-                if (fgets(response, sizeof(response), stdin)) {
-                    if (response[0] == 'y' || response[0] == 'Y') {
-                        use_timestamp = 1;
-                    } else {
-                        printf("Enter commit message: ");
-                        if (fgets(final_commit_msg, sizeof(final_commit_msg), stdin)) {
-                            final_commit_msg[strcspn(final_commit_msg, "\n")] = '\0';
-                        }
-                    }
-                }
-                break;
+        if (commit_result == 0) {
+            printf(" done\n");
+            show_success("Changes committed");
+        } else {
+            printf(" failed\n");
+            show_error("Nothing to commit or commit failed");
         }
+    }
+    
+    // Step 3: Push changes
+    if (local_changes || remote_changes) {
+        printf("\n");
+        start_loading("Pushing to remote...");
+        snprintf(cmd, sizeof(cmd), "cd \"%s\" && git push origin main 2>&1", path);
+        int push_result = system(cmd);
+        stop_loading();
         
-        // Generate timestamp if needed
-        if (use_timestamp) {
-            char timestamp[64];
-            time_t now = time(NULL);
-            struct tm* t = localtime(&now);
-            strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", t);
-            snprintf(final_commit_msg, sizeof(final_commit_msg), "gitsync: %s", timestamp);
+        if (push_result == 0) {
+            printf(" done\n");
+            show_success("Sync complete!");
+        } else {
+            printf(" failed\n");
+            show_error("Push failed - may need to pull again");
         }
-        
-        // Fetch latest changes
-        printf("Fetching changes...\n");
-        snprintf(cmd, sizeof(cmd), "cd \"%s\" && git fetch origin", path);
-        system(cmd);
-        
-        // Pull changes
-        printf("Pulling changes...\n");
-        snprintf(cmd, sizeof(cmd), "cd \"%s\" && git pull origin main", path);
-        system(cmd);
-        
-        // Commit with appropriate message
-        printf("Committing changes...\n");
-        snprintf(cmd, sizeof(cmd), "cd \"%s\" && git add -A && git commit -m \"%s\"", path, final_commit_msg);
-        system(cmd);
-        
-        // Push changes
-        printf("Pushing changes...\n");
-        snprintf(cmd, sizeof(cmd), "cd \"%s\" && git push origin main", path);
-        system(cmd);
-        
-        printf("Repository synced successfully!\n");
     } else {
-        printf("Not a git repository\n");
+        printf("\n%s[%s]%s Sync complete\n", COLOR_GREEN, "OK", COLOR_RESET);
     }
 }
 
-// Parse command line arguments into configuration
-void parse_arguments(int argc, char* argv[], ProgramConfig* config) {
+static void parse_arguments(int argc, char* argv[], ProgramConfig* config) {
     config->mode = MODE_AUTO;
     config->scan_dir = NULL;
     config->use_date_commit = 0;
-    config->commit_mode = COMMIT_MANUAL;  // Default to manual for backward compatibility
+    config->commit_mode = COMMIT_MANUAL;
     config->show_help = 0;
     config->show_version = 0;
     
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--date-commit") == 0) {
             config->use_date_commit = 1;
-            config->commit_mode = COMMIT_DATE;  // Maintain backward compatibility
+            config->commit_mode = COMMIT_DATE;
         } else if (strcmp(argv[i], "--commit-mode") == 0) {
             if (i + 1 < argc) {
                 if (strcmp(argv[i + 1], "date") == 0) {
@@ -469,19 +727,18 @@ void parse_arguments(int argc, char* argv[], ProgramConfig* config) {
                 } else if (strcmp(argv[i + 1], "prompt") == 0) {
                     config->commit_mode = COMMIT_PROMPT;
                 }
-                i++; // Skip the commit mode value
+                i++;
             }
         } else if (strcmp(argv[i], "--interface") == 0) {
-            // New --interface flag
             if (i + 1 < argc) {
                 if (strcmp(argv[i + 1], "auto") == 0) {
-                    config->mode = MODE_AUTO;
+                    config->mode = MODE_TUI;
                 } else if (strcmp(argv[i + 1], "simple") == 0) {
                     config->mode = MODE_SIMPLE;
                 } else if (strcmp(argv[i + 1], "tui") == 0) {
                     config->mode = MODE_TUI;
                 }
-                i++; // Skip the interface value
+                i++;
             }
         } else if (strcmp(argv[i], "--tui") == 0) {
             config->mode = MODE_TUI;
@@ -500,91 +757,51 @@ void parse_arguments(int argc, char* argv[], ProgramConfig* config) {
         }
     }
     
-    // Default to current directory if no directory specified
     if (!config->scan_dir) {
-        config->scan_dir = ".";
+        config->scan_dir = "";
     }
 }
 
-// Print help information
-void print_help(const char* program_name) {
-    printf("Usage: %s [OPTIONS] [DIRECTORY]\n", program_name);
-    printf("\nInterface Modes:\n");
-    printf("  --interface MODE   Set interface mode (auto|simple|tui, default: auto)\n");
-    printf("  --auto             Auto-detect best interface (default)\n");
-    printf("  --tui              Use TUI interface (fzf-based)\n");
-    printf("  --simple           Use simple text interface\n");
-    printf("\nCommit Modes:\n");
-    printf("  --commit-mode MODE Set commit mode (date|manual|prompt, default: manual)\n");
-    printf("  --date-commit      Use timestamped commit message (legacy, sets mode to date)\n");
-    printf("\nOptions:\n");
-    printf("  --help, -h         Show this help message\n");
-    printf("  --version, -v      Show version\n");
-    printf("\nCommit Mode Details:\n");
-    printf("  date               Use \"gitsync: YYYY-MM-DD HH:MM:SS\" format\n");
-    printf("  manual             Prompt for manual commit message each time\n");
-    printf("  prompt             Ask to choose between date/manual each sync\n");
-    printf("\nExamples:\n");
-    printf("  %s                              # Auto mode, manual commits, scan current directory\n", program_name);
-    printf("  %s --commit-mode date          # Use timestamped commits\n", program_name);
-    printf("  %s --commit-mode manual         # Prompt for manual commit messages\n", program_name);
-    printf("  %s --commit-mode prompt         # Ask to choose each time\n", program_name);
-    printf("  %s --interface tui --commit-mode date # TUI mode with date commits\n", program_name);
-    printf("  %s --interface simple --commit-mode manual # Simple mode with manual commits\n", program_name);
-    printf("  %s --date-commit                # Legacy flag - same as --commit-mode date\n", program_name);
-    printf("  %s /path/to/repos --commit-mode prompt # Specific directory, prompt mode\n", program_name);
+static void print_help(const char* program_name) {
+    printf("\n");
+    printf("%s  GitSync v2.0  %s\n", COLOR_GREEN, COLOR_RESET);
+    printf("\n");
+    
+    printf("%sUsage:%s %s [OPTIONS] [DIRECTORY]%s\n", COLOR_WHITE, COLOR_RESET, program_name, COLOR_RESET);
+    printf("\n");
+    
+    printf("%sOptions:%s\n", COLOR_YELLOW, COLOR_RESET);
+    printf("  %s--help, -h%s         Show this help information\n", COLOR_CYAN, COLOR_RESET);
+    printf("  %s--version, -v%s      Show version\n", COLOR_CYAN, COLOR_RESET);
+    printf("  %s--interface MODE%s    Interface mode: auto, simple, tui (default: auto)\n", COLOR_CYAN, COLOR_RESET);
+    printf("  %s--commit-mode MODE%s  Commit mode: date, manual, prompt (default: manual)\n", COLOR_CYAN, COLOR_RESET);
+    printf("\n");
+    
+    printf("%sTUI Controls:%s\n", COLOR_YELLOW, COLOR_RESET);
+    printf("  %s↑↓/jk%s              Navigate repository list\n", COLOR_CYAN, COLOR_RESET);
+    printf("  %senter%s              Select repository\n", COLOR_CYAN, COLOR_RESET);
+    printf("  %sType letters%s        Filter repositories\n", COLOR_CYAN, COLOR_RESET);
+    printf("  %sbackspace%s          Clear filter character\n", COLOR_CYAN, COLOR_RESET);
+    printf("  %sq%s                   Quit\n", COLOR_CYAN, COLOR_RESET);
+    printf("  %sn%s                   Rescan repositories\n", COLOR_CYAN, COLOR_RESET);
+    printf("\n");
+    
+    printf("%sRepository Indicators:%s\n", COLOR_YELLOW, COLOR_RESET);
+    printf("  %s[✓]%s Clean - no changes\n", COLOR_GREEN, COLOR_RESET);
+    printf("  %s[+]%s  Has local changes\n", COLOR_YELLOW, COLOR_RESET);
+    printf("  %s[↓]%s  Has remote changes\n", COLOR_CYAN, COLOR_RESET);
+    printf("\n");
 }
 
-// Print version information
-void print_version(void) {
-    printf("gitsync v1.2\n");
-}
-
-// Print interface mode information
-void print_interface_info(InterfaceMode mode) {
-    const char* mode_str;
-    switch (mode) {
-        case MODE_TUI:
-            mode_str = "TUI (fzf-based)";
-            break;
-        case MODE_SIMPLE:
-            mode_str = "Simple text";
-            break;
-        case MODE_AUTO:
-        default:
-            mode_str = "Auto-detect";
-            break;
-    }
-    printf("Interface mode: %s\n", mode_str);
-}
-
-// Print commit mode information
-void print_commit_mode_info(CommitMode mode) {
-    const char* mode_str;
-    switch (mode) {
-        case COMMIT_DATE:
-            mode_str = "Date-based (timestamped)";
-            break;
-        case COMMIT_MANUAL:
-            mode_str = "Manual (prompt each time)";
-            break;
-        case COMMIT_PROMPT:
-            mode_str = "Interactive (ask each time)";
-            break;
-        default:
-            mode_str = "Unknown";
-            break;
-    }
-    printf("Commit mode: %s\n", mode_str);
+static void print_version(void) {
+    printf("%s  GitSync v2.0  %s\n", COLOR_GREEN, COLOR_RESET);
 }
 
 int main(int argc, char* argv[]) {
     ProgramConfig config;
     
-    // Parse command line arguments
     parse_arguments(argc, argv, &config);
     
-    // Handle version and help flags
     if (config.show_version) {
         print_version();
         return 0;
@@ -595,41 +812,36 @@ int main(int argc, char* argv[]) {
         return 0;
     }
     
-    // Print startup information
-    print_version();
-    printf("Scanning directory: %s\n", config.scan_dir);
-    print_interface_info(config.mode);
+    printf("\n");
+    printf("%s  GitSync v2.0  %s\n", COLOR_GREEN, COLOR_RESET);
+    printf("\n");
     
-    print_commit_mode_info(config.commit_mode);
+    const char* dir_display = config.scan_dir[0] ? config.scan_dir : "(system-wide)";
+    printf("%s[%s]%s Directory: %s%s%s\n", COLOR_BLUE, "INFO", COLOR_RESET, COLOR_WHITE, dir_display, COLOR_RESET);
     
-    // Scan for repositories
-    scan_directory(config.scan_dir, 0);
+    int repo_count_temp = 0;
+    scan_github_repos(config.scan_dir, &repo_count_temp);
+    repo_count = repo_count_temp;
     
     if (repo_count == 0) {
-        printf("No repositories found.\n");
+        printf("\n");
+        show_warning("No repositories found.");
+        show_info("Scanned /home, /opt, /usr/local for .git directories.");
         return 1;
     }
     
-    printf("Found %d repositories:\n", repo_count);
-    for (int i = 0; i < repo_count; i++) {
-        printf("  %s (%s)\n", 
-               repos[i].name, 
-               repos[i].is_git ? "Git" : "No Git");
-    }
-    
-    // Repository selection using specified interface mode
-    printf("\nStarting repository selection...\n");
-    char* selected = select_repository_interface(config.mode);
+    char* selected = select_repository_interface(config.mode, config.scan_dir, config.commit_mode);
     
     if (selected) {
-        printf("\nSelected: %s\n", selected);
+        printf("\n");
+        show_info("Selected repository:");
+        printf("  %s%s%s\n", COLOR_WHITE, selected, COLOR_RESET);
         sync_repository(selected, config.commit_mode);
         free(selected);
     } else {
-        printf("\nNo repository selected.\n");
+        printf("\n");
+        show_info("No repository selected.");
     }
-    
-    // Cleanup (not needed with static repos array)
     
     return 0;
 }

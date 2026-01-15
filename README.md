@@ -1,140 +1,148 @@
-# GitHub LazySync - Smart File Management Tool
+# GITSYNC v2.0 - GitHub Repository Sync Tool
 
-A C-based tool for intelligent duplicate detection, file comparison, and automated cleanup in Obsidian vaults and Git repositories.
+A C-based terminal tool for smart Git repository synchronization with modern TUI interface.
 
 ## Features
 
-### Smart Detection
-- **Exact Duplicate Detection**: Byte-by-byte file comparison
-- **Content Similarity**: Advanced diff-based similarity scoring
-- **Filename Pattern Matching**: Identifies numbered duplicates (file.md, file 2.md)
-- **Case-insensitive Comparison**: Handles case variations
-- **Unicode Support**: Works with international characters
+### System-Wide Repository Discovery
+- Automatically scans `/home`, `/opt`, `/usr/local` for Git repositories
+- Excludes common non-project directories (.git, .oh-my-zsh, node_modules, etc.)
+- Displays repository count and status indicators
 
-### Smart Actions
-- **Intelligent File Selection**: Chooses files based on:
-  - Modification time (keep newest)
-  - File size (keep largest)
-  - Git history (preserve important versions)
-- **Safe Operations**: 
-  - Automatic backup before deletion
-  - Git-integrated changes
-  - Rollback capability
-- **Batch Processing**: Handles large repositories efficiently
+### Interface Modes
+- **TUI Mode** (default): Native terminal interface with real-time filtering and 3-panel layout
+- **Simple Mode**: Text-based interactive selection
+- **Auto Mode**: Automatically selects TUI when available
 
-### Integration
-- **Git Integration**: Uses git for version control
-- **Obsidian Aware**: Excludes .obsidian internal files
-- **Cross-platform**: Works on Linux, macOS, Windows (WSL)
-- **FZF Integration**: Interactive file selection with preview
+### Smart Sync Operations
+- **Change Detection**: Automatically detects local and remote changes
+- **Status Indicators**: [✓] clean, [+] modified, [↓] remote changes
+- **Simple Workflow**: Pull → Stage → Commit → Push
+- **Conflict Handling**: Detects conflicts and guides user to resolve manually
 
-## Build Instructions
+### TUI Design
+- **Clean Layout**: Header → Filter bar → Repository list → Selected details → Help bar
+- **Color Coding**: Semantic colors for status, headers, and indicators
+- **Help Bar**: Contextual keyboard shortcuts displayed at bottom
+- **Real-time Filtering**: Type to filter repository list
+
+### Commit Modes
+- **Date Mode** (`--commit-mode date`): Automatic timestamped commits
+- **Manual Mode** (`--commit-mode manual`): Prompt for commit message
+- **Prompt Mode** (`--commit-mode prompt`): Ask each time
+
+## Build
 
 ```bash
-# Using Make
-make
-
-# Using CMake
-mkdir build && cd build
-cmake ..
-make
-
 # Simple compilation
-gcc -Wall -Wextra -std=c99 -o github-lazysync src/main_simple.c
+gcc -Wall -Wextra -std=c99 -D_GNU_SOURCE -o gitsync src/github_scanner.c
+
+# Using Make (auto-detects clang or gcc)
+make
+
+# With optimizations
+make optimized
+
+# Static build
+make static-build
+
+# Debug build with address sanitizer
+make debug
 ```
 
-## Usage Examples
+## Installation
 
 ```bash
-# Basic test
-./github-lazysync
+# Install to /usr/local/bin
+sudo make install
 
-# Scan for duplicates
-./github-lazysync --scan /path/to/vault
-
-# Interactive cleanup with FZF
-./github-lazysync --cleanup --interactive
-
-# Dry run to preview changes
-./github-lazysync --cleanup --dry-run
+# Custom install prefix
+make install PREFIX=$HOME/.local
 ```
 
-## Development Status
+## Usage
 
-### Working
-- Basic project structure
-- Compilation system (Makefile, CMakeLists.txt)
-- Simple test program
-- File info structures
-- Duplicate detection framework
+```bash
+# Scan all repositories system-wide (default behavior)
+./gitsync
 
-### In Progress
-- Advanced duplicate detection algorithms
-- FZF integration for interactive selection
-- Git integration
-- Backup and recovery system
-- Content similarity analysis
+# Scan specific directory
+./gitsync /path/to/repos
 
-### Planned
-- Full CLI with argument parsing
-- Configuration file support
-- Performance optimization
-- Cross-platform compatibility
-- Advanced filtering options
+# TUI mode with date commits
+./gitsync --commit-mode date
 
-## Architecture
+# Simple text interface
+./gitsync --interface simple
+
+# Show help
+./gitsync --help
+
+# Show version
+./gitsync --version
+```
+
+## TUI Controls
+
+| Key | Action |
+|-----|--------|
+| Type any character | Filter repositories in real-time |
+| ↑/↓ or j/k | Navigate through list |
+| → or Enter | Select repository |
+| / | Start filtering |
+| Backspace | Remove filter character |
+| Ctrl+U | Clear filter completely |
+| n | Rescan repositories |
+| q | Quit |
+
+## Repository Indicators
+
+| Indicator | Meaning |
+|-----------|---------|
+| `[✓]` | Clean - no changes |
+| `[+]` | Has local uncommitted changes |
+| `[↓]` | Has remote changes to pull |
+
+## Static Analysis & Testing
+
+```bash
+# Run clang-tidy
+make clang-tidy
+
+# Run cppcheck
+make cppcheck
+
+# Run both
+make analyze
+
+# Format code
+make format
+```
+
+## Project Structure
 
 ```
 github-lazysync/
 ├── src/
-│   ├── main.c                 # Main entry point
-│   ├── main_simple.c          # Simple test version
-│   ├── file_info.c            # File information utilities
-│   └── duplicate_detector.c   # Duplicate detection logic
-├── include/
-│   ├── file_info.h            # File info structures
-│   └── duplicate_detector.h   # Duplicate detection interface
-├── tests/
-├── Makefile                 # Build system
-├── CMakeLists.txt          # CMake configuration
-└── README.md               # This file
+│   └── github_scanner.c    # Main source file (single-file implementation)
+├── gitsync                 # Compiled binary
+├── Makefile                # Build system with targets
+├── README.md               # This file
+└── AGENTS.md               # Evolve orchestrator configuration
 ```
 
-## Next Steps
+## Requirements
 
-1. Fix compilation issues in duplicate_detector.c
-2. Complete main.c with full CLI interface
-3. Implement FZF integration for interactive selection
-4. Add backup system before file deletion
-5. Test with real Obsidian vaults
-6. Performance optimization for large repositories
+- GCC or Clang compiler
+- POSIX-compatible system (Linux, macOS)
+- Git installed
+- tree command (optional, for file structure display)
+- Terminal with ANSI color support (for TUI mode)
 
-## Comparison with Bash Version
+## Version
 
-| Feature | obsync.sh | github-lazysync (C) |
-|---------|------------|----------------------|
-| Performance | Slow (bash overhead) | Fast (native C) |
-| Memory usage | High (subprocesses) | Low (efficient) |
-| Error handling | Basic | Advanced |
-| Duplicate detection | Simple | Sophisticated |
-| File comparison | External commands | Internal algorithms |
-| Configuration | Limited | Extensive |
-| Testing | Manual | Comprehensive |
-| Portability | Unix only | Cross-platform |
-| FZF Integration | None | Planned |
-| Maintainability | Moderate | High |
-| Extensibility | Low | High |
+Current version: 2.0
 
-## Why C Over Bash?
+## License
 
-1. Performance: Native execution, no subprocess overhead
-2. Complex algorithms: Better suited for sophisticated comparison logic
-3. Memory management: Precise control over memory usage
-4. Cross-platform: Easier compilation on different systems
-5. Testing: Unit test frameworks available
-6. Maintenance: Structured code is easier to maintain
-7. Extensibility: Plugin architecture possible
-8. Debugging: Better debugging tools available
-9. FZF Integration: Native C integration is cleaner
-
-This C project will provide a robust, efficient, and maintainable solution for Obsidian vault management with advanced features like FZF integration.
+Open source project for Git repository management.
