@@ -245,6 +245,28 @@ echo "1" | ./gitsync --interface simple --commit-mode date /path/to/Obsidian-Not
 
 **Category**: Validation (Functional Test)
 
+### 2025-01-15
+
+**Issue**: Release assets not downloadable via wget/curl (404 Not Found)
+
+**Lesson**: Repository was private, preventing unauthenticated downloads:
+1. gh release view showed assets as "uploaded"
+2. wget/curl returned 404 for download URLs
+3. gh repo view revealed `isPrivate: true`
+4. Fixed with: `gh repo edit VenTheZone/gitsync --visibility public`
+5. After making public: wget successfully downloaded 31K binary
+
+**Example**: Always make repository public BEFORE creating releases with downloadable assets:
+```bash
+gh repo edit OWNER/REPO --visibility public
+gh release create v1.0.0 ...
+gh release upload v1.0.0 ./binary
+```
+
+**Impact**: Release assets now publicly accessible for all users
+
+**Category**: DevOps (Release Management)
+
 ---
 
 *Tip: Use the `/smart-task` command to automatically add entries to this file after completing tasks.*
