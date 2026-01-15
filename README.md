@@ -2,6 +2,31 @@
 
 A C-based terminal tool for smart Git repository synchronization with modern TUI interface.
 
+## Quick Install
+
+```bash
+# Download and install in one command
+curl -L https://github.com/VenTheZone/gitsync/releases/download/v2.0.0/gitsync | sudo tee /usr/local/bin/gitsync > /dev/null && sudo chmod +x /usr/local/bin/gitsync
+
+# Verify installation
+gitsync --version
+```
+
+Or download manually from: https://github.com/VenTheZone/gitsync/releases/tag/v2.0.0
+
+## Quick Start
+
+```bash
+# Sync your Obsidian vault
+gitsync /path/to/Obsidian-Notes/
+
+# With TUI (default)
+gitsync --interface tui /path/to/vault/
+
+# With auto-timestamped commits (recommended)
+gitsync --commit-mode date /path/to/vault/
+```
+
 ## Features
 
 ### System-Wide Repository Discovery
