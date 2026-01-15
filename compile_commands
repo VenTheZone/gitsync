@@ -1,1 +1,0 @@
-{ "directory": "/home/ubuntu/Projects/github-lazysync", "file": "src/github_scanner.c", "output": "github_scanner.o", "arguments": ["/usr/lib/llvm-18/bin/clang", "-xc", "src/github_scanner.c", "-o", "github_scanner.o", "-Werror", "-Wall", "-Wextra", "-std=c99", "-D", "_GNU_SOURCE", "-c", "--target=x86_64-pc-linux-gnu"]},
