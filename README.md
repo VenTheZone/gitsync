@@ -144,6 +144,29 @@ make analyze
 make format
 ```
 
+## Troubleshooting
+
+**"Permission denied" when running gitsync:**
+```bash
+chmod +x gitsync
+```
+
+**"git: command not found":**
+Install git first: https://git-scm.com/downloads
+
+**TUI显示乱码:**
+Ensure terminal supports ANSI colors. Try simple mode:
+```bash
+gitsync --interface simple /path/to/vault/
+```
+
+**Sync显示"No repositories found":**
+Ensure the directory is a git repository:
+```bash
+cd /path/to/vault/
+git status
+```
+
 ## Project Structure
 
 ```
@@ -161,8 +184,18 @@ github-lazysync/
 - GCC or Clang compiler
 - POSIX-compatible system (Linux, macOS)
 - Git installed
-- tree command (optional, for file structure display)
-- Terminal with ANSI color support (for TUI mode)
+
+## For Developers
+
+```bash
+# Clone and build from source
+git clone https://github.com/VenTheZone/gitsync.git
+cd gitsync
+make
+
+# Run tests
+./gitsync --help
+```
 
 ## Version
 
