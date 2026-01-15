@@ -5,8 +5,8 @@ A C-based terminal tool for smart Git repository synchronization with modern TUI
 ## Quick Install
 
 ```bash
-# Download and install in one command
-curl -L https://github.com/VenTheZone/gitsync/releases/download/v2.0.0/gitsync | sudo tee /usr/local/bin/gitsync > /dev/null && sudo chmod +x /usr/local/bin/gitsync
+# Download and install (copy and paste this line)
+curl -L https://github.com/VenTheZone/gitsync/releases/download/v2.0.0/gitsync -o /tmp/gitsync && sudo chmod +x /tmp/gitsync && sudo mv /tmp/gitsync /usr/local/bin/gitsync
 
 # Verify installation
 gitsync --version
